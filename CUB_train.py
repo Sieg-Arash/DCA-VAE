@@ -211,8 +211,8 @@ for episode in range(EPISODE):
         print("Testing...")
 
 
-        gzsl_unseen_accuracy = evaluate(test_features,test_label,np.arange(200),attributes, CM, RM, EN, DE, GPU)
-        gzsl_seen_accuracy = evaluate(test_seen_features,test_seen_label,np.arange(200),attributes, CM, RM, EN, DE, GPU)
+        gzsl_unseen_accuracy = evaluate(test_features,test_label,np.arange(200),attributes, CM, RM, GPU)
+        gzsl_seen_accuracy = evaluate(test_seen_features,test_seen_label,np.arange(200),attributes, CM, RM, GPU)
 
         H = 2 * gzsl_seen_accuracy * gzsl_unseen_accuracy / (gzsl_unseen_accuracy + gzsl_seen_accuracy)
 
