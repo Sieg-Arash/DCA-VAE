@@ -1,4 +1,4 @@
-%%writefile single_experiment.py
+###%%writefile single_experiment.py
 ### execute this function to train and test the vae-model
 
 from vaemodel import Model
