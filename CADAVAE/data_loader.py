@@ -18,7 +18,7 @@ def map_label(label, classes):
     return mapped_label
 
 class DATA_LOADER(object):
-	def __len__():
+	def __len__(self):
 		return self.ntrain
     def __init__(self, dataset, aux_datasource, device='cuda'):
 
