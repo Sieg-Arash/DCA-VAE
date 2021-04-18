@@ -1,4 +1,4 @@
-%%writefile vaemodel.py
+#%%writefile vaemodel.py
 #vaemodel
 import copy
 import torch
