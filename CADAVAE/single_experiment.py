@@ -1,4 +1,3 @@
-###%%writefile single_experiment.py
 ### execute this function to train and test the vae-model
 
 from vaemodel import Model
@@ -30,30 +29,30 @@ args = parser.parse_args()
 hyperparameters = {
     'num_shots': 0,
     'device': 'cuda',
-    # 'model_specifics': {'cross_reconstruction': True,
-    #                    'name': 'CADA',
-    #                    'distance': 'wasserstein',
-    #                    'warmup': {'beta': {'factor': 0.25,
-    #                                        'end_epoch': 93,
-    #                                        'start_epoch': 0},
-    #                               'cross_reconstruction': {'factor': 2.37,
-    #                                                        'end_epoch': 75,
-    #                                                        'start_epoch': 21},
-    #                               'distance': {'factor': 8.13,
-    #                                            'end_epoch': 22,
-    #                                            'start_epoch': 6}}},
     'model_specifics': {'cross_reconstruction': True,
                        'name': 'CADA',
                        'distance': 'wasserstein',
                        'warmup': {'beta': {'factor': 0.25,
                                            'end_epoch': 93,
                                            'start_epoch': 0},
-                                  'cross_reconstruction': {'factor': 20,
+                                  'cross_reconstruction': {'factor': 2.37,
                                                            'end_epoch': 75,
                                                            'start_epoch': 21},
                                   'distance': {'factor': 8.13,
                                                'end_epoch': 22,
                                                'start_epoch': 6}}},
+#     'model_specifics': {'cross_reconstruction': True,
+#                        'name': 'CADA',
+#                        'distance': 'wasserstein',
+#                        'warmup': {'beta': {'factor': 0.25,
+#                                            'end_epoch': 93,
+#                                            'start_epoch': 0},
+#                                   'cross_reconstruction': {'factor': 20,
+#                                                            'end_epoch': 75,
+#                                                            'start_epoch': 21},
+#                                   'distance': {'factor': 8.13,
+#                                                'end_epoch': 22,
+#                                                'start_epoch': 6}}},
     'lr_gen_model': 0.00015,
     'generalized': True,
     'batch_size': 50,
@@ -156,7 +155,7 @@ else:
                                                     'AWA2': (0, 0, 200, 200), 'FLO': (0, 0, 200, 200)}
 
 
-model = Model( hyperparameters)
+model = Model(hyperparameters)
 model.to(hyperparameters['device'])
 
 """
@@ -173,6 +172,7 @@ for d in model.all_data_sources_without_duplicates:
 
 
 losses = model.train_vae()
+np.save("losses.npy", losses)
 
 u,s,h,history = model.train_classifier()
 

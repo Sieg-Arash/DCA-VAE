@@ -1,5 +1,4 @@
-#%%writefile vaemodel.py
-#vaemodel
+# vaemodel
 import copy
 import torch
 import torch.backends.cudnn as cudnn
@@ -11,26 +10,31 @@ from torch.utils import data
 from data_loader import DATA_LOADER as dataloader
 import final_classifier as  classifier
 import models
+from net import CooperationModule
+import numpy as np
+from sklearn.cluster import KMeans
+
 
 class LINEAR_LOGSOFTMAX(nn.Module):
     def __init__(self, input_dim, nclass):
         super(LINEAR_LOGSOFTMAX, self).__init__()
-        self.fc = nn.Linear(input_dim,nclass)
+        self.fc = nn.Linear(input_dim, nclass)
         self.logic = nn.LogSoftmax(dim=1)
-        self.lossfunction =  nn.NLLLoss()
+        self.lossfunction = nn.NLLLoss()
 
     def forward(self, x):
         o = self.logic(self.fc(x))
         return o
 
+
 class Model(nn.Module):
 
-    def __init__(self,hyperparameters):
-        super(Model,self).__init__()
+    def __init__(self, hyperparameters):
+        super(Model, self).__init__()
 
         self.device = hyperparameters['device']
         self.auxiliary_data_source = hyperparameters['auxiliary_data_source']
-        self.all_data_sources  = ['resnet_features',self.auxiliary_data_source]
+        self.all_data_sources = ['resnet_features', self.auxiliary_data_source]
         self.DATASET = hyperparameters['dataset']
         self.num_shots = hyperparameters['num_shots']
         self.latent_size = hyperparameters['latent_size']
@@ -39,8 +43,8 @@ class Model(nn.Module):
         self.warmup = hyperparameters['model_specifics']['warmup']
         self.generalized = hyperparameters['generalized']
         self.classifier_batch_size = 32
-        self.img_seen_samples   = hyperparameters['samples_per_class'][self.DATASET][0]
-        self.att_seen_samples   = hyperparameters['samples_per_class'][self.DATASET][1]
+        self.img_seen_samples = hyperparameters['samples_per_class'][self.DATASET][0]
+        self.att_seen_samples = hyperparameters['samples_per_class'][self.DATASET][1]
         self.att_unseen_samples = hyperparameters['samples_per_class'][self.DATASET][2]
         self.img_unseen_samples = hyperparameters['samples_per_class'][self.DATASET][3]
         self.reco_loss_function = hyperparameters['loss']
@@ -48,80 +52,100 @@ class Model(nn.Module):
         self.lr_cls = hyperparameters['lr_cls']
         self.cross_reconstruction = hyperparameters['model_specifics']['cross_reconstruction']
         self.cls_train_epochs = hyperparameters['cls_train_steps']
-        self.dataset = dataloader( self.DATASET, copy.deepcopy(self.auxiliary_data_source) , device= self.device )
+        self.dataset = dataloader(self.DATASET, copy.deepcopy(self.auxiliary_data_source), device=self.device)
 
-        if self.DATASET=='CUB':
-            self.num_classes=200
+        att = np.unique(self.dataset.aux_data.cpu(), axis=0)
+        kmeans = KMeans(n_clusters=3, random_state=1337).fit(att)  ### field number : K=3
+        att = kmeans.cluster_centers_
+        self.att = torch.tensor(att).float().cuda()
+        self.CM = CooperationModule(self.att)
+
+        if self.DATASET == 'CUB':
+            self.num_classes = 200
             self.num_novel_classes = 50
-        elif self.DATASET=='SUN':
-            self.num_classes=717
+        elif self.DATASET == 'SUN':
+            self.num_classes = 717
             self.num_novel_classes = 72
-        elif self.DATASET=='AWA1' or self.DATASET=='AWA2':
-            self.num_classes=50
+        elif self.DATASET == 'AWA1' or self.DATASET == 'AWA2':
+            self.num_classes = 50
             self.num_novel_classes = 10
 
         feature_dimensions = [2048, self.dataset.aux_data.size(1)]
-
         # Here, the encoders and decoders for all modalities are created and put into dict
 
         self.encoder = {}
 
-        for datatype, dim in zip(self.all_data_sources,feature_dimensions):
-
-            self.encoder[datatype] = models.encoder_template(dim,self.latent_size,self.hidden_size_rule[datatype],self.device)
+        for datatype, dim in zip(self.all_data_sources, feature_dimensions):
+            self.encoder[datatype] = models.encoder_template(dim, self.latent_size, self.hidden_size_rule[datatype],
+                                                             self.device)
 
             print(str(datatype) + ' ' + str(dim))
-
+        self.EN = nn.Linear(2048, self.dataset.aux_data.size(1))
         self.decoder = {}
-        for datatype, dim in zip(self.all_data_sources,feature_dimensions):
-            self.decoder[datatype] = models.decoder_template(self.latent_size,dim,self.hidden_size_rule[datatype],self.device)
+        for datatype, dim in zip(self.all_data_sources, feature_dimensions):
+            self.decoder[datatype] = models.decoder_template(self.latent_size, dim, self.hidden_size_rule[datatype],
+                                                             self.device)
 
         # An optimizer for all encoders and decoders is defined here
         parameters_to_optimize = list(self.parameters())
         for datatype in self.all_data_sources:
-            parameters_to_optimize +=  list(self.encoder[datatype].parameters())
-            parameters_to_optimize +=  list(self.decoder[datatype].parameters())
+            parameters_to_optimize += list(self.encoder[datatype].parameters())
+            parameters_to_optimize += list(self.decoder[datatype].parameters())
+        parameters_to_optimize += list(self.CM.parameters())
+        parameters_to_optimize += list(self.EN.parameters())
+        self.optimizer = optim.Adam(parameters_to_optimize, lr=hyperparameters['lr_gen_model'], betas=(0.9, 0.999),
+                                    eps=1e-08, weight_decay=0, amsgrad=True)
 
-        self.optimizer  = optim.Adam( parameters_to_optimize ,lr=hyperparameters['lr_gen_model'], betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=True)
-
-        if self.reco_loss_function=='l2':
+        if self.reco_loss_function == 'l2':
             self.reconstruction_criterion = nn.MSELoss(size_average=False)
 
-        elif self.reco_loss_function=='l1':
+        elif self.reco_loss_function == 'l1':
             self.reconstruction_criterion = nn.L1Loss(size_average=False)
 
     def reparameterize(self, mu, logvar):
         if self.reparameterize_with_noise:
             sigma = torch.exp(logvar)
-            eps = torch.cuda.FloatTensor(logvar.size()[0],1).normal_(0,1)
-            eps  = eps.expand(sigma.size())
-            return mu + sigma*eps
+            eps = torch.cuda.FloatTensor(logvar.size()[0], 1).normal_(0, 1)
+            eps = eps.expand(sigma.size())
+            return mu + sigma * eps
         else:
             return mu
 
     def forward(self):
         pass
 
-    def map_label(self,label, classes):
+    def map_label(self, label, classes):
         mapped_label = torch.LongTensor(label.size()).to(self.device)
         for i in range(classes.size(0)):
-            mapped_label[label==classes[i]] = i
+            mapped_label[label == classes[i]] = i
 
         return mapped_label
 
-    def trainstep(self, img, att):
+    def trainstep(self, img, att, label):
 
         ##############################################
         # Encode image features and additional
         # features
         ##############################################
+        #         att = self.CM(att)
+        img_t = self.EN(img)
+        img_K = F.normalize(img_t, 2, -1)
+        att_K = F.normalize(att, 2, -1)
+        d = torch.matmul(img_K, att_K.T)
+        LogSoftmax = nn.LogSoftmax(dim=1)
+        d = LogSoftmax(d)
+        a, b = d.shape
+        loss_dis = 0
+        for i, j in enumerate(label):
+            if i >= a or j >= b:
+                continue
+            loss_dis += d[i][j]
 
         mu_img, logvar_img = self.encoder['resnet_features'](img)
         z_from_img = self.reparameterize(mu_img, logvar_img)
 
         mu_att, logvar_att = self.encoder[self.auxiliary_data_source](att)
         z_from_att = self.reparameterize(mu_att, logvar_att)
-
 
         ##############################################
         # Reconstruct inputs
@@ -138,15 +162,8 @@ class Model(nn.Module):
         ##############################################
         img_from_att = self.decoder['resnet_features'](z_from_att)
         att_from_img = self.decoder[self.auxiliary_data_source](z_from_img)
-        soft = nn.Softmax(dim=1)
-        # cross_reconstruction_loss = - torch.sum(soft(torch.mm(img_from_att, img.t()))) \
-        #                       - torch.sum(soft(torch.mm(att_from_img, att.t())))
-        # cross_reconstruction_loss = - torch.sum(torch.eye(img.size()[1])*torch.mm(img.t(), img_from_att)) \
-        #                       - torch.sum(torch.eye(att.size()[1])*torch.mm(att.t(), att_from_img))
-        cross_reconstruction_loss = - torch.sum(torch.eye(img.size()[1]).cuda()*soft(torch.mm(img.t(), img_from_att))) \
-                              - torch.sum(torch.eye(att.size()[1]).cuda()*soft(torch.mm(att.t(), att_from_img)))
-        # cross_reconstruction_loss = self.reconstruction_criterion(img_from_att, img) \
-        #                             + self.reconstruction_criterion(att_from_img, att)
+        cross_reconstruction_loss = self.reconstruction_criterion(img_from_att, img) \
+                                    + self.reconstruction_criterion(att_from_img, att)
 
         ##############################################
         # KL-Divergence
@@ -168,34 +185,35 @@ class Model(nn.Module):
         # schedule
         ##############################################
 
-        # f1 = 1.0*(self.current_epoch - self.warmup['cross_reconstruction']['start_epoch'] )/(1.0*( self.warmup['cross_reconstruction']['end_epoch']- self.warmup['cross_reconstruction']['start_epoch']))
-        # f1 = f1*(1.0*self.warmup['cross_reconstruction']['factor'])
-        # cross_reconstruction_factor = torch.cuda.FloatTensor([min(max(f1,0),self.warmup['cross_reconstruction']['factor'])])
-        f1 = 1.0 - 1.0*(self.current_epoch - self.warmup['cross_reconstruction']['start_epoch'] )/(1.0*( self.warmup['cross_reconstruction']['end_epoch']- self.warmup['cross_reconstruction']['start_epoch']))
-        f1 = f1*(1.0*self.warmup['cross_reconstruction']['factor'])
-        cross_reconstruction_factor = torch.cuda.FloatTensor([max(min(f1,self.warmup['cross_reconstruction']['factor']), 0)])
+        f1 = 1.0 * (self.current_epoch - self.warmup['cross_reconstruction']['start_epoch']) / (1.0 * (
+                    self.warmup['cross_reconstruction']['end_epoch'] - self.warmup['cross_reconstruction'][
+                'start_epoch']))
+        f1 = f1 * (1.0 * self.warmup['cross_reconstruction']['factor'])
+        cross_reconstruction_factor = torch.cuda.FloatTensor(
+            [min(max(f1, 0), self.warmup['cross_reconstruction']['factor'])])
 
-        f2 = 1.0 * (self.current_epoch - self.warmup['beta']['start_epoch']) / ( 1.0 * (self.warmup['beta']['end_epoch'] - self.warmup['beta']['start_epoch']))
+        f2 = 1.0 * (self.current_epoch - self.warmup['beta']['start_epoch']) / (
+                    1.0 * (self.warmup['beta']['end_epoch'] - self.warmup['beta']['start_epoch']))
         f2 = f2 * (1.0 * self.warmup['beta']['factor'])
         beta = torch.cuda.FloatTensor([min(max(f2, 0), self.warmup['beta']['factor'])])
 
-        f3 = 1.0*(self.current_epoch - self.warmup['distance']['start_epoch'] )/(1.0*( self.warmup['distance']['end_epoch']- self.warmup['distance']['start_epoch']))
-        f3 = f3*(1.0*self.warmup['distance']['factor'])
-        distance_factor = torch.cuda.FloatTensor([min(max(f3,0),self.warmup['distance']['factor'])])
+        f3 = 1.0 * (self.current_epoch - self.warmup['distance']['start_epoch']) / (
+                    1.0 * (self.warmup['distance']['end_epoch'] - self.warmup['distance']['start_epoch']))
+        f3 = f3 * (1.0 * self.warmup['distance']['factor'])
+        distance_factor = torch.cuda.FloatTensor([min(max(f3, 0), self.warmup['distance']['factor'])])
 
         ##############################################
         # Put the loss together and call the optimizer
         ##############################################
-        print(cross_reconstruction_factor*cross_reconstruction_loss)
+
         self.optimizer.zero_grad()
 
         loss = reconstruction_loss - beta * KLD
-        loss += cross_reconstruction_factor*cross_reconstruction_loss
-        # if cross_reconstruction_loss>0:
-        #     loss += cross_reconstruction_factor*cross_reconstruction_loss
-        if distance_factor >0:
-            loss += distance_factor*distance
+        loss += cross_reconstruction_factor * cross_reconstruction_loss
 
+        if distance_factor > 0:
+            loss += distance_factor * distance
+        loss += loss_dis * 0.01
         loss.backward()
 
         self.optimizer.step()
@@ -206,37 +224,38 @@ class Model(nn.Module):
 
         losses = []
 
-        self.dataloader = data.DataLoader(self.dataset,batch_size= self.batch_size,shuffle= True,drop_last=True)#,num_workers = 4)
+        self.dataloader = data.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True,
+                                          drop_last=True)  # ,num_workers = 4)
 
-        self.dataset.novelclasses =self.dataset.novelclasses.long().cuda()
-        self.dataset.seenclasses =self.dataset.seenclasses.long().cuda()
-        #leave both statements
+        self.dataset.novelclasses = self.dataset.novelclasses.long().cuda()
+        self.dataset.seenclasses = self.dataset.seenclasses.long().cuda()
+        # leave both statements
         self.train()
         self.reparameterize_with_noise = True
 
         print('train for reconstruction')
-        for epoch in range(0, self.nepoch ):
+
+        for epoch in range(0, self.nepoch):
             self.current_epoch = epoch
 
-            i=-1
+            i = -1
             for iters in range(0, self.dataset.ntrain, self.batch_size):
-                i+=1
+                i += 1
 
                 label, data_from_modalities = self.dataset.next_batch(self.batch_size)
 
-                label= label.long().to(self.device)
+                label = label.long().to(self.device)
                 for j in range(len(data_from_modalities)):
                     data_from_modalities[j] = data_from_modalities[j].to(self.device)
                     data_from_modalities[j].requires_grad = False
 
-                loss = self.trainstep(data_from_modalities[0], data_from_modalities[1] )
+                loss = self.trainstep(data_from_modalities[0], data_from_modalities[1], label)
 
-                if i%50==0:
+                if i % 50 == 0:
+                    print('epoch ' + str(epoch) + ' | iter ' + str(i) + '\t' +
+                          ' | loss ' + str(loss)[:5])
 
-                    print('epoch ' + str(epoch) + ' | iter ' + str(i) + '\t'+
-                    ' | loss ' +  str(loss)[:5]   )
-
-                if i%50==0 and i>0:
+                if i % 50 == 0 and i > 0:
                     losses.append(loss)
 
         # turn into evaluation mode:
@@ -249,16 +268,14 @@ class Model(nn.Module):
 
     def train_classifier(self, show_plots=False):
 
-        if self.num_shots > 0 :
+        if self.num_shots > 0:
             print('================  transfer features from test to train ==================')
             self.dataset.transfer_features(self.num_shots, num_queries='num_features')
 
         history = []  # stores accuracies
 
-
         cls_seenclasses = self.dataset.seenclasses
         cls_novelclasses = self.dataset.novelclasses
-
 
         train_seen_feat = self.dataset.data['train_seen']['resnet_features']
         train_seen_label = self.dataset.data['train_seen']['labels']
@@ -268,7 +285,6 @@ class Model(nn.Module):
 
         novel_corresponding_labels = self.dataset.novelclasses.long().to(self.device)
         seen_corresponding_labels = self.dataset.seenclasses.long().to(self.device)
-
 
         # The resnet_features for testing the classifier are loaded here
         novel_test_feat = self.dataset.data['test_unseen'][
@@ -280,7 +296,6 @@ class Model(nn.Module):
 
         train_unseen_feat = self.dataset.data['train_unseen']['resnet_features']
         train_unseen_label = self.dataset.data['train_unseen']['labels']
-
 
         # in ZSL mode:
         if self.generalized == False:
@@ -305,14 +320,12 @@ class Model(nn.Module):
             # map cls novelclasses last
             cls_novelclasses = self.map_label(cls_novelclasses, cls_novelclasses)
 
-
         if self.generalized:
             print('mode: gzsl')
             clf = LINEAR_LOGSOFTMAX(self.latent_size, self.num_classes)
         else:
             print('mode: zsl')
             clf = LINEAR_LOGSOFTMAX(self.latent_size, self.num_novel_classes)
-
 
         clf.apply(models.weights_init)
 
@@ -373,19 +386,18 @@ class Model(nn.Module):
                 else:
                     return torch.cuda.FloatTensor([]), torch.cuda.LongTensor([])
 
-
             # some of the following might be empty tensors if the specified number of
             # samples is zero :
 
-            img_seen_feat,   img_seen_label   = sample_train_data_on_sample_per_class_basis(
-                train_seen_feat,train_seen_label,self.img_seen_samples )
+            img_seen_feat, img_seen_label = sample_train_data_on_sample_per_class_basis(
+                train_seen_feat, train_seen_label, self.img_seen_samples)
 
             img_unseen_feat, img_unseen_label = sample_train_data_on_sample_per_class_basis(
-                train_unseen_feat, train_unseen_label, self.img_unseen_samples )
+                train_unseen_feat, train_unseen_label, self.img_unseen_samples)
 
             att_unseen_feat, att_unseen_label = sample_train_data_on_sample_per_class_basis(
-                    novelclass_aux_data,
-                    novel_corresponding_labels,self.att_unseen_samples )
+                novelclass_aux_data,
+                novel_corresponding_labels, self.att_unseen_samples)
 
             att_seen_feat, att_seen_label = sample_train_data_on_sample_per_class_basis(
                 seenclass_aux_data,
@@ -399,14 +411,16 @@ class Model(nn.Module):
                 else:
                     return torch.cuda.FloatTensor([])
 
-            z_seen_img   = convert_datapoints_to_z(img_seen_feat, self.encoder['resnet_features'])
+            z_seen_img = convert_datapoints_to_z(img_seen_feat, self.encoder['resnet_features'])
             z_unseen_img = convert_datapoints_to_z(img_unseen_feat, self.encoder['resnet_features'])
-
+            #             if att_seen_feat.shape[0]!=0:
+            #                 att_seen_feat = self.CM(att_seen_feat)
+            #             att_unseen_feat = self.CM(att_unseen_feat)
             z_seen_att = convert_datapoints_to_z(att_seen_feat, self.encoder[self.auxiliary_data_source])
             z_unseen_att = convert_datapoints_to_z(att_unseen_feat, self.encoder[self.auxiliary_data_source])
 
-            train_Z = [z_seen_img, z_unseen_img ,z_seen_att    ,z_unseen_att]
-            train_L = [img_seen_label    , img_unseen_label,att_seen_label,att_unseen_label]
+            train_Z = [z_seen_img, z_unseen_img, z_seen_att, z_unseen_att]
+            train_L = [img_seen_label, img_unseen_label, att_seen_label, att_unseen_label]
 
             # empty tensors are sorted out
             train_X = [train_Z[i] for i in range(len(train_Z)) if train_Z[i].size(0) != 0]
@@ -436,7 +450,7 @@ class Model(nn.Module):
             if self.generalized:
 
                 print('[%.1f]     novel=%.4f, seen=%.4f, h=%.4f , loss=%.4f' % (
-                k, cls.acc_novel, cls.acc_seen, cls.H, cls.average_loss))
+                    k, cls.acc_novel, cls.acc_seen, cls.H, cls.average_loss))
 
                 history.append([torch.tensor(cls.acc_seen).item(), torch.tensor(cls.acc_novel).item(),
                                 torch.tensor(cls.H).item()])
